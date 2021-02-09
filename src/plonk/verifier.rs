@@ -29,6 +29,9 @@ pub fn verify_proof<'a, C: CurveAffine, T: TranscriptRead<C>>(
 
     let num_proofs = aux_commitments.len();
 
+    // Hash verification key into transcript
+    vk.hash(transcript).map_err(|_| Error::TranscriptError)?;
+
     for aux_commitments in aux_commitments.iter() {
         // Hash the aux (external) commitments into the transcript
         for commitment in *aux_commitments {
