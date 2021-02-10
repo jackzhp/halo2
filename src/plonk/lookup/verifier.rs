@@ -120,13 +120,14 @@ impl<C: CurveAffine> Evaluated<C> {
                 columns
                     .iter()
                     .map(|column| {
-                        match column {
-                            Expression::Advice(index) => advice_evals[*index],
-                            Expression::Fixed(index) => fixed_evals[*index],
-                            Expression::Aux(index) => aux_evals[*index],
-                            // TODO: other Expression variants
-                            _ => unreachable!(),
-                        }
+                        column.evaluate(
+                            &|index| fixed_evals[index].clone(),
+                            &|index| advice_evals[index].clone(),
+                            &|index| aux_evals[index].clone(),
+                            &|a, b| a + &b,
+                            &|a, b| a * &b,
+                            &|a, scalar| a * scalar,
+                        )
                     })
                     .fold(C::Scalar::zero(), |acc, eval| acc * &*theta + &eval)
             };

@@ -168,15 +168,10 @@ impl<'a, F: Field, B: Basis> Sub<&'a Polynomial<F, B>> for Polynomial<F, B> {
     }
 }
 
-impl<'a, F: Field> Mul<&'a Polynomial<F, ExtendedLagrangeCoeff>>
-    for Polynomial<F, ExtendedLagrangeCoeff>
-{
-    type Output = Polynomial<F, ExtendedLagrangeCoeff>;
+impl<'a, F: Field, B: Basis> Mul<&'a Polynomial<F, B>> for Polynomial<F, B> {
+    type Output = Polynomial<F, B>;
 
-    fn mul(
-        mut self,
-        rhs: &'a Polynomial<F, ExtendedLagrangeCoeff>,
-    ) -> Polynomial<F, ExtendedLagrangeCoeff> {
+    fn mul(mut self, rhs: &'a Polynomial<F, B>) -> Polynomial<F, B> {
         parallelize(&mut self.values, |lhs, start| {
             for (lhs, rhs) in lhs.iter_mut().zip(rhs.values[start..].iter()) {
                 *lhs *= *rhs;
