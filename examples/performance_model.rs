@@ -1,5 +1,6 @@
+use group::Curve;
 use halo2::{
-    arithmetic::{Curve, FieldExt},
+    arithmetic::FieldExt,
     model::ModelRecorder,
     pasta::{EqAffine, Fp},
     plonk::*,
@@ -16,7 +17,7 @@ use std::marker::PhantomData;
 #[derive(Copy, Clone, Debug)]
 pub struct Variable(Column<Advice>, usize);
 
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 struct PLONKConfig {
     a: Column<Advice>,
     b: Column<Advice>,
@@ -28,7 +29,7 @@ struct PLONKConfig {
     sm: Column<Fixed>,
     sp: Column<Fixed>,
 
-    perm: usize,
+    perm: Permutation,
 }
 
 trait StandardCS<FF: FieldExt> {
@@ -156,21 +157,13 @@ impl<'a, FF: FieldExt, CS: Assignment<FF>> StandardCS<FF> for StandardPLONK<'a, 
         ))
     }
     fn copy(&mut self, left: Variable, right: Variable) -> Result<(), Error> {
-        let left_column = match left.0 {
-            x if x == self.config.a => 0,
-            x if x == self.config.b => 1,
-            x if x == self.config.c => 2,
-            _ => unreachable!(),
-        };
-        let right_column = match right.0 {
-            x if x == self.config.a => 0,
-            x if x == self.config.b => 1,
-            x if x == self.config.c => 2,
-            _ => unreachable!(),
-        };
-
-        self.cs
-            .copy(self.config.perm, left_column, left.1, right_column, right.1)
+        self.cs.copy(
+            &self.config.perm,
+            left.0.into(),
+            left.1,
+            right.0.into(),
+            right.1,
+        )
     }
     fn public_input<F>(&mut self, f: F) -> Result<Variable, Error>
     where
@@ -194,9 +187,9 @@ impl<F: FieldExt> Circuit<F> for MyCircuit<F> {
         let a = meta.advice_column();
         let b = meta.advice_column();
         let c = meta.advice_column();
-        let p = meta.aux_column();
+        let p = meta.instance_column();
 
-        let perm = meta.permutation(&[a, b, c]);
+        let perm = meta.permutation(&[a.into(), b.into(), c.into()]);
 
         let sm = meta.fixed_column();
         let sa = meta.fixed_column();
@@ -219,7 +212,7 @@ impl<F: FieldExt> Circuit<F> for MyCircuit<F> {
 
         meta.create_gate("Public input", |meta| {
             let a = meta.query_advice(a, Rotation::cur());
-            let p = meta.query_aux(p, Rotation::cur());
+            let p = meta.query_instance(p, Rotation::cur());
             let sp = meta.query_fixed(sp, Rotation::cur());
 
             sp * (a + p * (-F::one()))

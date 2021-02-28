@@ -2,12 +2,13 @@ use halo2::{
     arithmetic::FieldExt,
     dev::circuit_layout,
     pasta::Fp,
-    plonk::{Advice, Assignment, Circuit, Column, ConstraintSystem, Error, Fixed},
+    plonk::{Advice, Assignment, Circuit, Column, ConstraintSystem, Error, Fixed, Permutation},
     poly::Rotation,
 };
 use plotters::prelude::*;
 use std::marker::PhantomData;
 
+#[allow(clippy::many_single_char_names)]
 fn main() {
     /// This represents an advice column at a certain row in the ConstraintSystem
     #[derive(Copy, Clone, Debug)]
@@ -29,8 +30,8 @@ fn main() {
         sl: Column<Fixed>,
         sl2: Column<Fixed>,
 
-        perm: usize,
-        perm2: usize,
+        perm: Permutation,
+        perm2: Permutation,
     }
 
     trait StandardCS<FF: FieldExt> {
@@ -194,26 +195,18 @@ fn main() {
             ))
         }
         fn copy(&mut self, left: Variable, right: Variable) -> Result<(), Error> {
-            let left_column = match left.0 {
-                x if x == self.config.a => 0,
-                x if x == self.config.b => 1,
-                x if x == self.config.c => 2,
-                _ => unreachable!(),
-            };
-            let right_column = match right.0 {
-                x if x == self.config.a => 0,
-                x if x == self.config.b => 1,
-                x if x == self.config.c => 2,
-                _ => unreachable!(),
-            };
-
-            self.cs
-                .copy(self.config.perm, left_column, left.1, right_column, right.1)?;
             self.cs.copy(
-                self.config.perm2,
-                left_column,
+                &self.config.perm,
+                left.0.into(),
                 left.1,
-                right_column,
+                right.0.into(),
+                right.1,
+            )?;
+            self.cs.copy(
+                &self.config.perm2,
+                left.0.into(),
+                left.1,
+                right.0.into(),
                 right.1,
             )
         }
@@ -254,10 +247,10 @@ fn main() {
             let sf = meta.fixed_column();
             let c = meta.advice_column();
             let d = meta.advice_column();
-            let p = meta.aux_column();
+            let p = meta.instance_column();
 
-            let perm = meta.permutation(&[a, b, c]);
-            let perm2 = meta.permutation(&[a, b, c]);
+            let perm = meta.permutation(&[a.into(), b.into(), c.into()]);
+            let perm2 = meta.permutation(&[a.into(), b.into(), c.into()]);
 
             let sm = meta.fixed_column();
             let sa = meta.fixed_column();
@@ -268,23 +261,26 @@ fn main() {
             let sl2 = meta.fixed_column();
 
             /*
-             *    A    B        ...  sl   sl2
+             *   A         B      ...  sl        sl2
              * [
-             *   aux   0        ...  0    0
-             *   a     a        ...  0    0
-             *   a     a^2      ...  0    0
-             *   a     a        ...  0    0
-             *   a     a^2      ...  0    0
-             *   ...   ...      ...  ...  ...
-             *   ...   ...      ...  aux  0
-             *   ...   ...      ...  a    a
-             *   ...   ...      ...  a    a^2
-             *   ...   ...      ...  0    0
-             *
+             *   instance  0      ...  0         0
+             *   a         a      ...  0         0
+             *   a         a^2    ...  0         0
+             *   a         a      ...  0         0
+             *   a         a^2    ...  0         0
+             *   ...       ...    ...  ...       ...
+             *   ...       ...    ...  instance  0
+             *   ...       ...    ...  a         a
+             *   ...       ...    ...  a         a^2
+             *   ...       ...    ...  0         0
              * ]
              */
-            meta.lookup(&[a.into()], &[sl.into()]);
-            meta.lookup(&[a.into(), b.into()], &[sl.into(), sl2.into()]);
+            let a_ = meta.query_any(a.into(), Rotation::cur());
+            let b_ = meta.query_any(b.into(), Rotation::cur());
+            let sl_ = meta.query_any(sl.into(), Rotation::cur());
+            let sl2_ = meta.query_any(sl2.into(), Rotation::cur());
+            meta.lookup(&[a_.clone()], &[sl_.clone()]);
+            meta.lookup(&[a_, b_], &[sl_, sl2_]);
 
             meta.create_gate("Combined add-mult", |meta| {
                 let d = meta.query_advice(d, Rotation::next());
@@ -304,7 +300,7 @@ fn main() {
 
             meta.create_gate("Public input", |meta| {
                 let a = meta.query_advice(a, Rotation::cur());
-                let p = meta.query_aux(p, Rotation::cur());
+                let p = meta.query_instance(p, Rotation::cur());
                 let sp = meta.query_fixed(sp, Rotation::cur());
 
                 sp * (a + p * (-F::one()))
@@ -372,9 +368,9 @@ fn main() {
     }
 
     let a = Fp::rand();
-    let a_squared = a * &a;
-    let aux = Fp::one() + Fp::one();
-    let lookup_table = vec![aux, a, a, Fp::zero()];
+    let a_squared = a * a;
+    let instance = Fp::one() + Fp::one();
+    let lookup_table = vec![instance, a, a, Fp::zero()];
     let lookup_table_2 = vec![Fp::zero(), a, a_squared, Fp::zero()];
 
     let circuit: MyCircuit<Fp> = MyCircuit {

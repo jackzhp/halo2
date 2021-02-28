@@ -19,6 +19,9 @@ const_assert!(size_of::<usize>() >= 4);
 pub trait FieldExt:
     ff::PrimeField + From<bool> + Ord + ConstantTimeEq + Group<Scalar = Self>
 {
+    /// Modulus of the field written as a string for display purposes
+    const MODULUS: &'static str;
+
     /// Generator of the $2^S$ multiplicative subgroup
     const ROOT_OF_UNITY: Self;
 
@@ -312,7 +315,7 @@ impl<F: FieldExt> SqrtTables<F> {
         (is_square, res)
     }
 
-    /// Common part of sqrt_ratio and sqrt_alt: return res given v = u^((T-1)/2) and uv = u * v.
+    /// Common part of sqrt_ratio and sqrt_alt: return their result given v = u^((T-1)/2) and uv = u * v.
     fn sqrt_common(&self, uv: &F, v: &F) -> F {
         let sqr = |x: F, i: u32| (0..i).fold(x, |x, _| x.square());
         let inv = |x: F| self.inv[self.hasher.hash(&x)] as usize;

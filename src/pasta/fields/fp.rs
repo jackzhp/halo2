@@ -1,7 +1,7 @@
-use bitvec::{array::BitArray, order::Lsb0};
 use core::convert::TryInto;
 use core::fmt;
 use core::ops::{Add, Mul, Neg, Sub};
+use ff::FieldBits;
 use lazy_static::lazy_static;
 use rand::RngCore;
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq, CtOption};
@@ -550,7 +550,7 @@ impl ff::PrimeField for Fp {
         self.to_bytes()
     }
 
-    fn to_le_bits(&self) -> BitArray<Lsb0, Self::ReprBits> {
+    fn to_le_bits(&self) -> FieldBits<Self::ReprBits> {
         let bytes = self.to_bytes();
 
         #[cfg(not(target_pointer_width = "64"))]
@@ -573,21 +573,21 @@ impl ff::PrimeField for Fp {
             u64::from_le_bytes(bytes[24..32].try_into().unwrap()),
         ];
 
-        BitArray::new(limbs)
+        FieldBits::new(limbs)
     }
 
     fn is_odd(&self) -> bool {
         self.to_bytes()[0] & 1 == 1
     }
 
-    fn char_le_bits() -> BitArray<Lsb0, Self::ReprBits> {
+    fn char_le_bits() -> FieldBits<Self::ReprBits> {
         #[cfg(not(target_pointer_width = "64"))]
         {
-            BitArray::new(MODULUS_LIMBS_32)
+            FieldBits::new(MODULUS_LIMBS_32)
         }
 
         #[cfg(target_pointer_width = "64")]
-        BitArray::new(MODULUS.0)
+        FieldBits::new(MODULUS.0)
     }
 
     fn multiplicative_generator() -> Self {
@@ -605,6 +605,8 @@ lazy_static! {
 }
 
 impl FieldExt for Fp {
+    const MODULUS: &'static str =
+        "0x40000000000000000000000000000000224698fc094cf91b992d30ed00000001";
     const ROOT_OF_UNITY: Self = ROOT_OF_UNITY;
     const ROOT_OF_UNITY_INV: Self = Fp::from_raw([
         0xf0b87c7db2ce91f6,
@@ -759,7 +761,7 @@ impl FieldExt for Fp {
         let rq = sqr(rp, 4) * r11;
         let rr = sqr(rq, 7) * r111;
         let rs = sqr(rr, 3) * r11;
-        rs.square()
+        rs.square() // rt
     }
 }
 

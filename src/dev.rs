@@ -6,7 +6,7 @@ use crate::{
     arithmetic::{FieldExt, Group},
     plonk::{
         permutation, Advice, Any, Assignment, Circuit, Column, ColumnType, ConstraintSystem, Error,
-        Fixed,
+        Expression, Fixed, Permutation,
     },
     poly::Rotation,
 };
@@ -130,9 +130,9 @@ pub enum VerifyFailure {
 /// };
 ///
 /// // This circuit has no public inputs.
-/// let aux = vec![];
+/// let instance = vec![];
 ///
-/// let prover = MockProver::<Fp>::run(K, &circuit, aux).unwrap();
+/// let prover = MockProver::<Fp>::run(K, &circuit, instance).unwrap();
 /// assert_eq!(
 ///     prover.verify(),
 ///     Err(VerifyFailure::Gate {
@@ -143,7 +143,7 @@ pub enum VerifyFailure {
 /// );
 /// ```
 #[derive(Debug)]
-pub struct MockProver<F: Group> {
+pub struct MockProver<F: Group + Field> {
     n: u32,
     cs: ConstraintSystem<F>,
 
@@ -151,8 +151,8 @@ pub struct MockProver<F: Group> {
     fixed: Vec<Vec<F>>,
     // The advice cells in the circuit, arranged as [column][row].
     advice: Vec<Vec<F>>,
-    // The aux cells in the circuit, arranged as [column][row].
-    aux: Vec<Vec<F>>,
+    // The instance cells in the circuit, arranged as [column][row].
+    instance: Vec<Vec<F>>,
 
     permutations: Vec<permutation::keygen::Assembly>,
 }
@@ -211,18 +211,34 @@ impl<F: Field + Group> Assignment<F> for MockProver<F> {
 
     fn copy(
         &mut self,
-        permutation: usize,
-        left_column: usize,
+        permutation: &Permutation,
+        left_column: Column<Any>,
         left_row: usize,
-        right_column: usize,
+        right_column: Column<Any>,
         right_row: usize,
     ) -> Result<(), crate::plonk::Error> {
         // Check bounds first
-        if permutation >= self.permutations.len() {
+        if permutation.index() >= self.permutations.len() {
             return Err(Error::BoundsFailure);
         }
 
-        self.permutations[permutation].copy(left_column, left_row, right_column, right_row)
+        let left_column_index = permutation
+            .mapping()
+            .iter()
+            .position(|c| c == &left_column)
+            .ok_or(Error::SynthesisError)?;
+        let right_column_index = permutation
+            .mapping()
+            .iter()
+            .position(|c| c == &right_column)
+            .ok_or(Error::SynthesisError)?;
+
+        self.permutations[permutation.index()].copy(
+            left_column_index,
+            left_row,
+            right_column_index,
+            right_row,
+        )
     }
 
     fn push_namespace<NR, N>(&mut self, _: N)
@@ -244,7 +260,7 @@ impl<F: FieldExt> MockProver<F> {
     pub fn run<ConcreteCircuit: Circuit<F>>(
         k: u32,
         circuit: &ConcreteCircuit,
-        aux: Vec<Vec<F>>,
+        instance: Vec<Vec<F>>,
     ) -> Result<Self, Error> {
         let n = 1 << k;
 
@@ -264,7 +280,7 @@ impl<F: FieldExt> MockProver<F> {
             cs,
             fixed,
             advice,
-            aux,
+            instance,
             permutations,
         };
 
@@ -296,9 +312,10 @@ impl<F: FieldExt> MockProver<F> {
                 }
 
                 if gate.evaluate(
+                    &|scalar| scalar,
                     &load(n, row, &self.cs.fixed_queries, &self.fixed),
                     &load(n, row, &self.cs.advice_queries, &self.advice),
-                    &load(n, row, &self.cs.aux_queries, &self.aux),
+                    &load(n, row, &self.cs.instance_queries, &self.instance),
                     &|a, b| a + &b,
                     &|a, b| a * &b,
                     &|a, scalar| a * scalar,
@@ -316,21 +333,41 @@ impl<F: FieldExt> MockProver<F> {
         // Check that all lookups exist in their respective tables.
         for (lookup_index, lookup) in self.cs.lookups.iter().enumerate() {
             for input_row in 0..n {
-                let load = |column: &Column<Any>, row| match column.column_type() {
-                    Any::Fixed => self.fixed[column.index()][row as usize],
-                    Any::Advice => self.advice[column.index()][row as usize],
-                    Any::Aux => self.aux[column.index()][row as usize],
+                let load = |expression: &Expression<F>, row| {
+                    expression.evaluate(
+                        &|scalar| scalar,
+                        &|index| {
+                            let column_index = self.cs.fixed_queries[index].0.index();
+                            self.fixed[column_index][row as usize]
+                        },
+                        &|index| {
+                            let column_index = self.cs.advice_queries[index].0.index();
+                            self.advice[column_index][row as usize]
+                        },
+                        &|index| {
+                            let column_index = self.cs.instance_queries[index].0.index();
+                            self.instance[column_index][row as usize]
+                        },
+                        &|a, b| a + b,
+                        &|a, b| a * b,
+                        &|a, scalar| a * scalar,
+                    )
                 };
 
                 let inputs: Vec<_> = lookup
-                    .input_columns
+                    .input_expressions
                     .iter()
                     .map(|c| load(c, input_row))
                     .collect();
-                if !(0..n)
-                    .map(|table_row| lookup.table_columns.iter().map(move |c| load(c, table_row)))
-                    .any(|table_row| table_row.eq(inputs.iter().cloned()))
-                {
+                let lookup_passes = (0..n)
+                    .map(|table_row| {
+                        lookup
+                            .table_expressions
+                            .iter()
+                            .map(move |c| load(c, table_row))
+                    })
+                    .any(|table_row| table_row.eq(inputs.iter().cloned()));
+                if !lookup_passes {
                     return Err(VerifyFailure::Lookup {
                         lookup_index,
                         row: input_row as usize,

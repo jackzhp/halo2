@@ -15,8 +15,10 @@ A UPA circuit depends on a ***configuration***:
 * A finite field $\mathbb{F}$, where cell values (for a given statement and witness) will be
   elements of $\mathbb{F}$.
 * The number of columns in the matrix, and a specification of each column as being
-  ***fixed***, ***advice***, or ***auxiliary***. Fixed columns are fixed by the circuit;
-  advice columns correspond to witness values; and auxiliary columns are used for public inputs.
+  ***fixed***, ***advice***, or ***instance***. Fixed columns are fixed by the circuit;
+  advice columns correspond to witness values; and instance columns are normally used for
+  public inputs (technically, they can be used for any elements shared between the prover
+  and verifier).
 
 * A subset of the columns that can participate in equality constraints.
 
@@ -28,8 +30,8 @@ A UPA circuit depends on a ***configuration***:
   another row relative to this one (with wrap-around, i.e. taken modulo $n$). The maximum
   degree of each polynomial is given by the polynomial degree bound.
 
-* A sequence of ***lookup arguments*** defined over tuples of ***input columns*** and
-  ***table columns***.
+* A sequence of ***lookup arguments*** defined over tuples of ***input expressions***
+  (which are multivariate polynomials as above) and ***table columns***.
 
 A UPA circuit also defines:
 

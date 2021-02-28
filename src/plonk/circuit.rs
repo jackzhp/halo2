@@ -1,13 +1,20 @@
 use core::cmp::max;
 use core::ops::{Add, Mul};
 use ff::Field;
-use std::convert::TryFrom;
+use std::{
+    convert::TryFrom,
+    ops::{Neg, Sub},
+};
 
 use super::{lookup, permutation, Error};
-use crate::poly::Rotation;
+use crate::{
+    arithmetic::FieldExt,
+    circuit::{Chip, Region},
+    poly::Rotation,
+};
 
 /// A column type
-pub trait ColumnType: 'static + Sized {}
+pub trait ColumnType: 'static + Sized + std::fmt::Debug {}
 
 /// A column with an index and type
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -34,24 +41,24 @@ pub struct Advice;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct Fixed;
 
-/// An auxiliary column
+/// An instance column
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub struct Aux;
+pub struct Instance;
 
-/// An enum over the Advice, Fixed, Aux structs
+/// An enum over the Advice, Fixed, Instance structs
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum Any {
     /// An Advice variant
     Advice,
     /// A Fixed variant
     Fixed,
-    /// An Auxiliary variant
-    Aux,
+    /// An Instance variant
+    Instance,
 }
 
 impl ColumnType for Advice {}
 impl ColumnType for Fixed {}
-impl ColumnType for Aux {}
+impl ColumnType for Instance {}
 impl ColumnType for Any {}
 
 impl From<Column<Advice>> for Column<Any> {
@@ -72,11 +79,11 @@ impl From<Column<Fixed>> for Column<Any> {
     }
 }
 
-impl From<Column<Aux>> for Column<Any> {
-    fn from(advice: Column<Aux>) -> Column<Any> {
+impl From<Column<Instance>> for Column<Any> {
+    fn from(advice: Column<Instance>) -> Column<Any> {
         Column {
             index: advice.index(),
-            column_type: Any::Aux,
+            column_type: Any::Instance,
         }
     }
 }
@@ -109,17 +116,108 @@ impl TryFrom<Column<Any>> for Column<Fixed> {
     }
 }
 
-impl TryFrom<Column<Any>> for Column<Aux> {
+impl TryFrom<Column<Any>> for Column<Instance> {
     type Error = &'static str;
 
     fn try_from(any: Column<Any>) -> Result<Self, Self::Error> {
         match any.column_type() {
-            Any::Aux => Ok(Column {
+            Any::Instance => Ok(Column {
                 index: any.index(),
-                column_type: Aux,
+                column_type: Instance,
             }),
-            _ => Err("Cannot convert into Column<Aux>"),
+            _ => Err("Cannot convert into Column<Instance>"),
         }
+    }
+}
+
+/// A selector, representing a fixed boolean value per row of the circuit.
+///
+/// Selectors can be used to conditionally enable (portions of) gates:
+/// ```
+/// use halo2::poly::Rotation;
+/// # use halo2::pasta::Fp;
+/// # use halo2::plonk::ConstraintSystem;
+///
+/// # let mut meta = ConstraintSystem::<Fp>::default();
+/// let a = meta.advice_column();
+/// let b = meta.advice_column();
+/// let s = meta.selector();
+///
+/// meta.create_gate("foo", |meta| {
+///     let a = meta.query_advice(a, Rotation::prev());
+///     let b = meta.query_advice(b, Rotation::cur());
+///     let s = meta.query_selector(s, Rotation::cur());
+///
+///     // On rows where the selector is enabled, a is constrained to equal b.
+///     // On rows where the selector is disabled, a and b can take any value.
+///     s * (a - b)
+/// });
+/// ```
+///
+/// Selectors are disabled on all rows by default, and must be explicitly enabled on each
+/// row when required:
+/// ```
+/// use halo2::{circuit::{Chip, Layouter}, plonk::{Advice, Column, Error, Selector}};
+/// # use ff::Field;
+/// # use halo2::plonk::Fixed;
+///
+/// struct Config {
+///     a: Column<Advice>,
+///     b: Column<Advice>,
+///     s: Selector,
+/// }
+///
+/// fn circuit_logic<C: Chip>(mut layouter: impl Layouter<C>) -> Result<(), Error> {
+///     let config = layouter.config().clone();
+///     # let config: Config = todo!();
+///     layouter.assign_region(|| "bar", |mut region| {
+///         region.assign_advice(|| "a", config.a, 0, || Ok(C::Field::one()))?;
+///         region.assign_advice(|| "a", config.b, 1, || Ok(C::Field::one()))?;
+///         config.s.enable(&mut region, 1)
+///     })?;
+///     Ok(())
+/// }
+/// ```
+#[derive(Clone, Copy, Debug)]
+pub struct Selector(Column<Fixed>);
+
+impl Selector {
+    /// Enable this selector at the given offset within the given region.
+    pub fn enable<C: Chip>(&self, region: &mut Region<C>, offset: usize) -> Result<(), Error> {
+        // TODO: Ensure that the default for a selector's cells is always zero, if we
+        // alter the proving system to change the global default.
+        // TODO: Add Region::enable_selector method to allow the layouter to control the
+        // selector's assignment.
+        // https://github.com/zcash/halo2/issues/116
+        region
+            .assign_fixed(|| "", self.0, offset, || Ok(C::Field::one()))
+            .map(|_| ())
+    }
+}
+
+/// A permutation.
+#[derive(Clone, Debug)]
+pub struct Permutation {
+    /// The index of this permutation.
+    index: usize,
+    /// The mapping between columns involved in this permutation.
+    mapping: Vec<Column<Any>>,
+}
+
+impl Permutation {
+    /// Configures a new permutation for the given columns.
+    pub fn new<F: FieldExt>(meta: &mut ConstraintSystem<F>, columns: &[Column<Any>]) -> Self {
+        meta.permutation(columns)
+    }
+
+    /// Returns index of permutation
+    pub fn index(&self) -> usize {
+        self.index
+    }
+
+    /// Returns mapping of permutation
+    pub fn mapping(&self) -> &[Column<Any>] {
+        &self.mapping
     }
 }
 
@@ -173,13 +271,13 @@ pub trait Assignment<F: Field> {
         A: FnOnce() -> AR,
         AR: Into<String>;
 
-    /// Assign two advice columns to have the same value
+    /// Assign two cells to have the same value
     fn copy(
         &mut self,
-        permutation: usize,
-        left_column: usize,
+        permutation: &Permutation,
+        left_column: Column<Any>,
         left_row: usize,
-        right_column: usize,
+        right_column: Column<Any>,
         right_row: usize,
     ) -> Result<(), Error>;
 
@@ -221,12 +319,14 @@ pub trait Circuit<F: Field> {
 /// Low-degree expression representing an identity that must hold over the committed columns.
 #[derive(Clone, Debug)]
 pub enum Expression<F> {
+    /// This is a constant polynomial
+    Constant(F),
     /// This is a fixed column queried at a certain relative location
     Fixed(usize),
     /// This is an advice (witness) column queried at a certain relative location
     Advice(usize),
-    /// This is an auxiliary (external) column queried at a certain relative location
-    Aux(usize),
+    /// This is an instance (external) column queried at a certain relative location
+    Instance(usize),
     /// This is the sum of two polynomials
     Sum(Box<Expression<F>>, Box<Expression<F>>),
     /// This is the product of two polynomials
@@ -240,30 +340,34 @@ impl<F: Field> Expression<F> {
     /// operations.
     pub fn evaluate<T>(
         &self,
+        constant: &impl Fn(F) -> T,
         fixed_column: &impl Fn(usize) -> T,
         advice_column: &impl Fn(usize) -> T,
-        aux_column: &impl Fn(usize) -> T,
+        instance_column: &impl Fn(usize) -> T,
         sum: &impl Fn(T, T) -> T,
         product: &impl Fn(T, T) -> T,
         scaled: &impl Fn(T, F) -> T,
     ) -> T {
         match self {
+            Expression::Constant(scalar) => constant(*scalar),
             Expression::Fixed(index) => fixed_column(*index),
             Expression::Advice(index) => advice_column(*index),
-            Expression::Aux(index) => aux_column(*index),
+            Expression::Instance(index) => instance_column(*index),
             Expression::Sum(a, b) => {
                 let a = a.evaluate(
+                    constant,
                     fixed_column,
                     advice_column,
-                    aux_column,
+                    instance_column,
                     sum,
                     product,
                     scaled,
                 );
                 let b = b.evaluate(
+                    constant,
                     fixed_column,
                     advice_column,
-                    aux_column,
+                    instance_column,
                     sum,
                     product,
                     scaled,
@@ -272,17 +376,19 @@ impl<F: Field> Expression<F> {
             }
             Expression::Product(a, b) => {
                 let a = a.evaluate(
+                    constant,
                     fixed_column,
                     advice_column,
-                    aux_column,
+                    instance_column,
                     sum,
                     product,
                     scaled,
                 );
                 let b = b.evaluate(
+                    constant,
                     fixed_column,
                     advice_column,
-                    aux_column,
+                    instance_column,
                     sum,
                     product,
                     scaled,
@@ -291,9 +397,10 @@ impl<F: Field> Expression<F> {
             }
             Expression::Scaled(a, f) => {
                 let a = a.evaluate(
+                    constant,
                     fixed_column,
                     advice_column,
-                    aux_column,
+                    instance_column,
                     sum,
                     product,
                     scaled,
@@ -306,9 +413,10 @@ impl<F: Field> Expression<F> {
     /// Compute the degree of this polynomial
     pub fn degree(&self) -> usize {
         match self {
+            Expression::Constant(_) => 0,
             Expression::Fixed(_) => 1,
             Expression::Advice(_) => 1,
-            Expression::Aux(_) => 1,
+            Expression::Instance(_) => 1,
             Expression::Sum(a, b) => max(a.degree(), b.degree()),
             Expression::Product(a, b) => a.degree() + b.degree(),
             Expression::Scaled(poly, _) => poly.degree(),
@@ -316,10 +424,24 @@ impl<F: Field> Expression<F> {
     }
 }
 
+impl<F: Field> Neg for Expression<F> {
+    type Output = Expression<F>;
+    fn neg(self) -> Self::Output {
+        Expression::Scaled(Box::new(self), -F::one())
+    }
+}
+
 impl<F> Add for Expression<F> {
     type Output = Expression<F>;
     fn add(self, rhs: Expression<F>) -> Expression<F> {
         Expression::Sum(Box::new(self), Box::new(rhs))
+    }
+}
+
+impl<F: Field> Sub for Expression<F> {
+    type Output = Expression<F>;
+    fn sub(self, rhs: Expression<F>) -> Expression<F> {
+        Expression::Sum(Box::new(self), Box::new(-rhs))
     }
 }
 
@@ -345,13 +467,13 @@ pub(crate) struct PointIndex(pub usize);
 /// This is a description of the circuit environment, such as the gate, column and
 /// permutation arrangements.
 #[derive(Debug, Clone)]
-pub struct ConstraintSystem<F> {
+pub struct ConstraintSystem<F: Field> {
     pub(crate) num_fixed_columns: usize,
     pub(crate) num_advice_columns: usize,
-    pub(crate) num_aux_columns: usize,
+    pub(crate) num_instance_columns: usize,
     pub(crate) gates: Vec<(&'static str, Expression<F>)>,
     pub(crate) advice_queries: Vec<(Column<Advice>, Rotation)>,
-    pub(crate) aux_queries: Vec<(Column<Aux>, Rotation)>,
+    pub(crate) instance_queries: Vec<(Column<Instance>, Rotation)>,
     pub(crate) fixed_queries: Vec<(Column<Fixed>, Rotation)>,
 
     // Vector of permutation arguments, where each corresponds to a sequence of columns
@@ -359,8 +481,32 @@ pub struct ConstraintSystem<F> {
     pub(crate) permutations: Vec<permutation::Argument>,
 
     // Vector of lookup arguments, where each corresponds to a sequence of
-    // input columns and a sequence of table columns involved in the lookup.
-    pub(crate) lookups: Vec<lookup::Argument>,
+    // input expressions and a sequence of table expressions involved in the lookup.
+    pub(crate) lookups: Vec<lookup::Argument<F>>,
+}
+
+/// Represents the minimal parameters that determine a `ConstraintSystem`.
+#[derive(Debug)]
+pub struct PinnedConstraintSystem<'a, F: Field> {
+    num_fixed_columns: &'a usize,
+    num_advice_columns: &'a usize,
+    num_instance_columns: &'a usize,
+    gates: PinnedGates<'a, F>,
+    advice_queries: &'a Vec<(Column<Advice>, Rotation)>,
+    instance_queries: &'a Vec<(Column<Instance>, Rotation)>,
+    fixed_queries: &'a Vec<(Column<Fixed>, Rotation)>,
+    permutations: &'a Vec<permutation::Argument>,
+    lookups: &'a Vec<lookup::Argument<F>>,
+}
+
+struct PinnedGates<'a, F: Field>(&'a Vec<(&'static str, Expression<F>)>);
+
+impl<'a, F: Field> std::fmt::Debug for PinnedGates<'a, F> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        f.debug_list()
+            .entries(self.0.iter().map(|(_, expr)| expr))
+            .finish()
+    }
 }
 
 impl<F: Field> Default for ConstraintSystem<F> {
@@ -368,11 +514,11 @@ impl<F: Field> Default for ConstraintSystem<F> {
         ConstraintSystem {
             num_fixed_columns: 0,
             num_advice_columns: 0,
-            num_aux_columns: 0,
+            num_instance_columns: 0,
             gates: vec![],
             fixed_queries: Vec::new(),
             advice_queries: Vec::new(),
-            aux_queries: Vec::new(),
+            instance_queries: Vec::new(),
             permutations: Vec::new(),
             lookups: Vec::new(),
         }
@@ -380,41 +526,60 @@ impl<F: Field> Default for ConstraintSystem<F> {
 }
 
 impl<F: Field> ConstraintSystem<F> {
-    /// Add a permutation argument for some advice columns
-    pub fn permutation(&mut self, columns: &[Column<Advice>]) -> usize {
+    /// Obtain a pinned version of this constraint system; a structure with the
+    /// minimal parameters needed to determine the rest of the constraint
+    /// system.
+    pub fn pinned(&self) -> PinnedConstraintSystem<'_, F> {
+        PinnedConstraintSystem {
+            num_fixed_columns: &self.num_fixed_columns,
+            num_advice_columns: &self.num_advice_columns,
+            num_instance_columns: &self.num_instance_columns,
+            gates: PinnedGates(&self.gates),
+            fixed_queries: &self.fixed_queries,
+            advice_queries: &self.advice_queries,
+            instance_queries: &self.instance_queries,
+            permutations: &self.permutations,
+            lookups: &self.lookups,
+        }
+    }
+
+    /// Add a permutation argument for some columns
+    pub fn permutation(&mut self, columns: &[Column<Any>]) -> Permutation {
         let index = self.permutations.len();
 
         for column in columns {
-            self.query_advice_index(*column, Rotation::cur());
+            self.query_any_index(*column, Rotation::cur());
         }
         self.permutations
             .push(permutation::Argument::new(columns.to_vec()));
 
-        index
+        Permutation {
+            index,
+            mapping: columns.to_vec(),
+        }
     }
 
-    /// Add a lookup argument for some input columns and table columns.
-    /// The function will panic if the number of input columns and table
-    /// columns are not the same.
+    /// Add a lookup argument for some input expressions and table expressions.
+    /// The function will panic if the number of input expressions and table
+    /// expressions are not the same.
     pub fn lookup(
         &mut self,
-        input_columns: &[Column<Any>],
-        table_columns: &[Column<Any>],
+        input_expressions: &[Expression<F>],
+        table_expressions: &[Expression<F>],
     ) -> usize {
-        assert_eq!(input_columns.len(), table_columns.len());
+        assert_eq!(input_expressions.len(), table_expressions.len());
 
         let index = self.lookups.len();
 
-        for input in input_columns {
-            self.query_any_index(*input, Rotation::cur());
-        }
-        for table in table_columns {
-            self.query_any_index(*table, Rotation::cur());
-        }
         self.lookups
-            .push(lookup::Argument::new(input_columns, table_columns));
+            .push(lookup::Argument::new(input_expressions, table_expressions));
 
         index
+    }
+
+    /// Query a selector at a relative position.
+    pub fn query_selector(&mut self, selector: Selector, at: Rotation) -> Expression<F> {
+        Expression::Fixed(self.query_fixed_index(selector.0, at))
     }
 
     fn query_fixed_index(&mut self, column: Column<Fixed>, at: Rotation) -> usize {
@@ -457,31 +622,33 @@ impl<F: Field> ConstraintSystem<F> {
         Expression::Advice(self.query_advice_index(column, at))
     }
 
-    fn query_aux_index(&mut self, column: Column<Aux>, at: Rotation) -> usize {
+    fn query_instance_index(&mut self, column: Column<Instance>, at: Rotation) -> usize {
         // Return existing query, if it exists
-        for (index, aux_query) in self.aux_queries.iter().enumerate() {
-            if aux_query == &(column, at) {
+        for (index, instance_query) in self.instance_queries.iter().enumerate() {
+            if instance_query == &(column, at) {
                 return index;
             }
         }
 
         // Make a new query
-        let index = self.aux_queries.len();
-        self.aux_queries.push((column, at));
+        let index = self.instance_queries.len();
+        self.instance_queries.push((column, at));
 
         index
     }
 
-    /// Query an auxiliary column at a relative position
-    pub fn query_aux(&mut self, column: Column<Aux>, at: Rotation) -> Expression<F> {
-        Expression::Aux(self.query_aux_index(column, at))
+    /// Query an instance column at a relative position
+    pub fn query_instance(&mut self, column: Column<Instance>, at: Rotation) -> Expression<F> {
+        Expression::Instance(self.query_instance_index(column, at))
     }
 
     fn query_any_index(&mut self, column: Column<Any>, at: Rotation) -> usize {
         match column.column_type() {
             Any::Advice => self.query_advice_index(Column::<Advice>::try_from(column).unwrap(), at),
             Any::Fixed => self.query_fixed_index(Column::<Fixed>::try_from(column).unwrap(), at),
-            Any::Aux => self.query_aux_index(Column::<Aux>::try_from(column).unwrap(), at),
+            Any::Instance => {
+                self.query_instance_index(Column::<Instance>::try_from(column).unwrap(), at)
+            }
         }
     }
 
@@ -494,9 +661,9 @@ impl<F: Field> ConstraintSystem<F> {
             Any::Fixed => Expression::Fixed(
                 self.query_fixed_index(Column::<Fixed>::try_from(column).unwrap(), at),
             ),
-            Any::Aux => {
-                Expression::Aux(self.query_aux_index(Column::<Aux>::try_from(column).unwrap(), at))
-            }
+            Any::Instance => Expression::Instance(
+                self.query_instance_index(Column::<Instance>::try_from(column).unwrap(), at),
+            ),
         }
     }
 
@@ -520,14 +687,14 @@ impl<F: Field> ConstraintSystem<F> {
         panic!("get_fixed_query_index called for non-existent query");
     }
 
-    pub(crate) fn get_aux_query_index(&self, column: Column<Aux>, at: Rotation) -> usize {
-        for (index, aux_query) in self.aux_queries.iter().enumerate() {
-            if aux_query == &(column, at) {
+    pub(crate) fn get_instance_query_index(&self, column: Column<Instance>, at: Rotation) -> usize {
+        for (index, instance_query) in self.instance_queries.iter().enumerate() {
+            if instance_query == &(column, at) {
                 return index;
             }
         }
 
-        panic!("get_aux_query_index called for non-existent query");
+        panic!("get_instance_query_index called for non-existent query");
     }
 
     pub(crate) fn get_any_query_index(&self, column: Column<Any>, at: Rotation) -> usize {
@@ -538,7 +705,9 @@ impl<F: Field> ConstraintSystem<F> {
             Any::Fixed => {
                 self.get_fixed_query_index(Column::<Fixed>::try_from(column).unwrap(), at)
             }
-            Any::Aux => self.get_aux_query_index(Column::<Aux>::try_from(column).unwrap(), at),
+            Any::Instance => {
+                self.get_instance_query_index(Column::<Instance>::try_from(column).unwrap(), at)
+            }
         }
     }
 
@@ -546,6 +715,13 @@ impl<F: Field> ConstraintSystem<F> {
     pub fn create_gate(&mut self, name: &'static str, f: impl FnOnce(&mut Self) -> Expression<F>) {
         let poly = f(self);
         self.gates.push((name, poly));
+    }
+
+    /// Allocate a new selector.
+    pub fn selector(&mut self) -> Selector {
+        // TODO: Track selectors separately, and combine selectors where possible.
+        // https://github.com/zcash/halo2/issues/116
+        Selector(self.fixed_column())
     }
 
     /// Allocate a new fixed column
@@ -568,13 +744,45 @@ impl<F: Field> ConstraintSystem<F> {
         tmp
     }
 
-    /// Allocate a new auxiliary column
-    pub fn aux_column(&mut self) -> Column<Aux> {
+    /// Allocate a new instance column
+    pub fn instance_column(&mut self) -> Column<Instance> {
         let tmp = Column {
-            index: self.num_aux_columns,
-            column_type: Aux,
+            index: self.num_instance_columns,
+            column_type: Instance,
         };
-        self.num_aux_columns += 1;
+        self.num_instance_columns += 1;
         tmp
+    }
+
+    /// Compute the degree of the constraint system (the maximum degree of all
+    /// constraints).
+    pub fn degree(&self) -> usize {
+        // The permutation argument will serve alongside the gates, so must be
+        // accounted for.
+        let mut degree = self
+            .permutations
+            .iter()
+            .map(|p| p.required_degree())
+            .max()
+            .unwrap_or(1);
+
+        // The lookup argument also serves alongside the gates and must be accounted
+        // for.
+        degree = std::cmp::max(
+            degree,
+            self.lookups
+                .iter()
+                .map(|l| l.required_degree())
+                .max()
+                .unwrap_or(1),
+        );
+
+        // Account for each gate to ensure our quotient polynomial is the
+        // correct degree and that our extended domain is the right size.
+        for (_, poly) in self.gates.iter() {
+            degree = std::cmp::max(degree, poly.degree());
+        }
+
+        degree
     }
 }

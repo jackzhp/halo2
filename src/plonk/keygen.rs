@@ -1,10 +1,11 @@
 use ff::Field;
+use group::Curve;
 
 use super::{
-    circuit::{Advice, Assignment, Circuit, Column, ConstraintSystem, Fixed},
-    permutation, Error, LagrangeCoeff, Polynomial, ProvingKey, VerifyingKey,
+    circuit::{Advice, Any, Assignment, Circuit, Column, ConstraintSystem, Fixed},
+    permutation, Error, LagrangeCoeff, Permutation, Polynomial, ProvingKey, VerifyingKey,
 };
-use crate::arithmetic::{Curve, CurveAffine};
+use crate::arithmetic::CurveAffine;
 use crate::poly::{
     commitment::{Blind, Params},
     EvaluationDomain, Rotation,
@@ -24,31 +25,7 @@ where
     let mut cs = ConstraintSystem::default();
     let config = ConcreteCircuit::configure(&mut cs);
 
-    // The permutation argument will serve alongside the gates, so must be
-    // accounted for.
-    let mut degree = cs
-        .permutations
-        .iter()
-        .map(|p| p.required_degree())
-        .max()
-        .unwrap_or(1);
-
-    // The lookup argument also serves alongside the gates and must be accounted
-    // for.
-    degree = std::cmp::max(
-        degree,
-        cs.lookups
-            .iter()
-            .map(|l| l.required_degree())
-            .max()
-            .unwrap_or(1),
-    );
-
-    // Account for each gate to ensure our quotient polynomial is the
-    // correct degree and that our extended domain is the right size.
-    for (_, poly) in cs.gates.iter() {
-        degree = std::cmp::max(degree, poly.degree());
-    }
+    let degree = cs.degree();
 
     let domain = EvaluationDomain::new(degree as u32, params.k);
 
@@ -115,18 +92,34 @@ impl<F: Field> Assignment<F> for Assembly<F> {
 
     fn copy(
         &mut self,
-        permutation: usize,
-        left_column: usize,
+        permutation: &Permutation,
+        left_column: Column<Any>,
         left_row: usize,
-        right_column: usize,
+        right_column: Column<Any>,
         right_row: usize,
     ) -> Result<(), Error> {
         // Check bounds first
-        if permutation >= self.permutations.len() {
+        if permutation.index() >= self.permutations.len() {
             return Err(Error::BoundsFailure);
         }
 
-        self.permutations[permutation].copy(left_column, left_row, right_column, right_row)
+        let left_column_index = permutation
+            .mapping()
+            .iter()
+            .position(|c| c == &left_column)
+            .ok_or(Error::SynthesisError)?;
+        let right_column_index = permutation
+            .mapping()
+            .iter()
+            .position(|c| c == &right_column)
+            .ok_or(Error::SynthesisError)?;
+
+        self.permutations[permutation.index()].copy(
+            left_column_index,
+            left_row,
+            right_column_index,
+            right_row,
+        )
     }
 
     fn push_namespace<NR, N>(&mut self, _: N)

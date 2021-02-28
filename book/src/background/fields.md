@@ -254,9 +254,6 @@ describes the general strategy. (There is another square root algorithm that use
 quadratic extension fields, but it doesn't pay off in efficiency until the prime becomes
 quite large.)
 
-> TODO: describe more recent algorithms, e.g. Bernstein's table-based method and
-> [eprint 2020/1407](https://eprint.iacr.org/2020/1407).
-
 [ts-sqrt]: https://en.wikipedia.org/wiki/Tonelli%E2%80%93Shanks_algorithm
 
 ## Roots of unity
@@ -294,4 +291,4 @@ Important notes:
   of unity). There is a two-to-one mapping between the elements and their squares.
 
 ## References
-[^chinese-remainder]: Friedman, R. (n.d.) "Cyclic Groups and Elementary Number Theory II" (p. 5). http://www.math.columbia.edu/~rf/numbertheory2.pdf
+[^chinese-remainder]: [Friedman, R. (n.d.) "Cyclic Groups and Elementary Number Theory II" (p. 5).](http://www.math.columbia.edu/~rf/numbertheory2.pdf)

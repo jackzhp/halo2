@@ -3,13 +3,13 @@
 //!
 //! [halo]: https://eprint.iacr.org/2019/1021
 
-use blake2b_simd::{Params as Blake2bParams, State as Blake2bState};
-
 use super::{Coeff, LagrangeCoeff, Polynomial};
-use crate::arithmetic::{best_fft, best_multiexp, parallelize, Curve, CurveAffine, FieldExt};
+use crate::arithmetic::{
+    best_fft, best_multiexp, parallelize, CurveAffine, CurveExt, FieldExt, Group,
+};
 
 use ff::{Field, PrimeField};
-use std::convert::TryInto;
+use group::{prime::PrimeCurveAffine, Curve, Group as _};
 use std::ops::{Add, AddAssign, Mul, MulAssign};
 
 mod msm;
@@ -45,49 +45,41 @@ impl<C: CurveAffine> Params<C> {
 
         let n: u64 = 1 << k;
 
-        let try_and_increment = |hasher: &Blake2bState| {
-            let mut trial = 0u64;
-            loop {
-                let mut hasher = hasher.clone();
-                hasher.update(&(trial.to_le_bytes())[..]);
-                let p = C::from_bytes(&hasher.finalize().as_bytes().try_into().unwrap());
-                if bool::from(p.is_some()) {
-                    break p.unwrap();
-                }
-                trial += 1;
-            }
-        };
-
-        let g = {
+        let g_projective = {
             let mut g = Vec::with_capacity(n as usize);
-            g.resize(n as usize, C::zero());
+            g.resize(n as usize, C::Curve::identity());
 
             parallelize(&mut g, move |g, start| {
-                let mut hasher = Blake2bParams::new()
-                    .hash_length(32)
-                    .personal(C::BLAKE2B_PERSONALIZATION)
-                    .to_state();
-                hasher.update(b"G vector");
+                let hasher = C::CurveExt::hash_to_curve("Halo2-Parameters");
 
                 for (i, g) in g.iter_mut().enumerate() {
-                    let i = (i + start) as u64;
-                    let mut hasher = hasher.clone();
-                    hasher.update(&(i.to_le_bytes())[..]);
+                    let i = (i + start) as u32;
 
-                    *g = try_and_increment(&hasher);
+                    let mut message = [0u8; 5];
+                    message[1..5].copy_from_slice(&i.to_le_bytes());
+
+                    *g = hasher(&message);
                 }
             });
 
             g
         };
 
+        let g = {
+            let mut g = vec![C::identity(); n as usize];
+            parallelize(&mut g, |g, starts| {
+                C::Curve::batch_normalize(&g_projective[starts..(starts + g.len())], g);
+            });
+            g
+        };
+
         // Let's evaluate all of the Lagrange basis polynomials
         // using an inverse FFT.
-        let mut alpha_inv = C::Scalar::ROOT_OF_UNITY_INV;
+        let mut alpha_inv = <<C as PrimeCurveAffine>::Curve as Group>::Scalar::ROOT_OF_UNITY_INV;
         for _ in k..C::Scalar::S {
             alpha_inv = alpha_inv.square();
         }
-        let mut g_lagrange_projective = g.iter().map(|g| g.to_projective()).collect::<Vec<_>>();
+        let mut g_lagrange_projective = g_projective;
         best_fft(&mut g_lagrange_projective, alpha_inv, k);
         let minv = C::Scalar::TWO_INV.pow_vartime(&[k as u64, 0, 0, 0]);
         parallelize(&mut g_lagrange_projective, |g, _| {
@@ -97,9 +89,9 @@ impl<C: CurveAffine> Params<C> {
         });
 
         let g_lagrange = {
-            let mut g_lagrange = vec![C::zero(); n as usize];
+            let mut g_lagrange = vec![C::identity(); n as usize];
             parallelize(&mut g_lagrange, |g_lagrange, starts| {
-                C::Projective::batch_to_affine(
+                C::Curve::batch_normalize(
                     &g_lagrange_projective[starts..(starts + g_lagrange.len())],
                     g_lagrange,
                 );
@@ -108,25 +100,9 @@ impl<C: CurveAffine> Params<C> {
             g_lagrange
         };
 
-        let h = {
-            let mut hasher = Blake2bParams::new()
-                .hash_length(32)
-                .personal(C::BLAKE2B_PERSONALIZATION)
-                .to_state();
-            hasher.update(b"H");
-
-            try_and_increment(&hasher)
-        };
-
-        let u = {
-            let mut hasher = Blake2bParams::new()
-                .hash_length(32)
-                .personal(C::BLAKE2B_PERSONALIZATION)
-                .to_state();
-            hasher.update(b"U");
-
-            try_and_increment(&hasher)
-        };
+        let hasher = C::CurveExt::hash_to_curve("Halo2-Parameters");
+        let h = hasher(&[1]).to_affine();
+        let u = hasher(&[2]).to_affine();
 
         Params {
             k,
@@ -141,11 +117,7 @@ impl<C: CurveAffine> Params<C> {
     /// This computes a commitment to a polynomial described by the provided
     /// slice of coefficients. The commitment will be blinded by the blinding
     /// factor `r`.
-    pub fn commit(
-        &self,
-        poly: &Polynomial<C::Scalar, Coeff>,
-        r: Blind<C::Scalar>,
-    ) -> C::Projective {
+    pub fn commit(&self, poly: &Polynomial<C::Scalar, Coeff>, r: Blind<C::Scalar>) -> C::Curve {
         metrics::increment_counter!("multiexp", "size" => format!("{}", poly.len() + 1), "fn" => "commit");
         let mut tmp_scalars = Vec::with_capacity(poly.len() + 1);
         let mut tmp_bases = Vec::with_capacity(poly.len() + 1);
@@ -166,7 +138,7 @@ impl<C: CurveAffine> Params<C> {
         &self,
         poly: &Polynomial<C::Scalar, LagrangeCoeff>,
         r: Blind<C::Scalar>,
-    ) -> C::Projective {
+    ) -> C::Curve {
         metrics::increment_counter!("multiexp", "size" => format!("{}", poly.len() + 1), "fn" => "commit_lagrange");
         let mut tmp_scalars = Vec::with_capacity(poly.len() + 1);
         let mut tmp_bases = Vec::with_capacity(poly.len() + 1);
@@ -195,13 +167,13 @@ impl<C: CurveAffine> Params<C> {
     pub fn write<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
         writer.write_all(&self.k.to_le_bytes())?;
         for g_element in &self.g {
-            writer.write_all(&g_element.to_bytes())?;
+            writer.write_all(g_element.to_bytes().as_ref())?;
         }
         for g_lagrange_element in &self.g_lagrange {
-            writer.write_all(&g_lagrange_element.to_bytes())?;
+            writer.write_all(g_lagrange_element.to_bytes().as_ref())?;
         }
-        writer.write_all(&self.h.to_bytes())?;
-        writer.write_all(&self.u.to_bytes())?;
+        writer.write_all(self.h.to_bytes().as_ref())?;
+        writer.write_all(self.u.to_bytes().as_ref())?;
 
         Ok(())
     }

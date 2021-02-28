@@ -6,7 +6,9 @@ use plotters::{
 use std::cmp;
 use std::collections::HashSet;
 
-use crate::plonk::{Advice, Any, Assignment, Circuit, Column, ConstraintSystem, Error, Fixed};
+use crate::plonk::{
+    Advice, Any, Assignment, Circuit, Column, ConstraintSystem, Error, Fixed, Permutation,
+};
 
 /// Renders the circuit layout on the given drawing area.
 ///
@@ -45,18 +47,18 @@ pub fn circuit_layout<F: Field, ConcreteCircuit: Circuit<F>, DB: DrawingBackend>
 
     // Figure out what order to render the columns in.
     // TODO: For now, just render them in the order they were configured.
-    let total_columns = cs.num_advice_columns + cs.num_aux_columns + cs.num_fixed_columns;
+    let total_columns = cs.num_advice_columns + cs.num_instance_columns + cs.num_fixed_columns;
     let column_index = |column: &Column<Any>| {
         column.index()
             + match column.column_type() {
                 Any::Advice => 0,
-                Any::Aux => cs.num_advice_columns,
-                Any::Fixed => cs.num_advice_columns + cs.num_aux_columns,
+                Any::Instance => cs.num_advice_columns,
+                Any::Fixed => cs.num_advice_columns + cs.num_instance_columns,
             }
     };
 
     // Prepare the grid layout. We render a red background for advice columns, white for
-    // aux columns, and blue for fixed columns.
+    // instance columns, and blue for fixed columns.
     let root =
         drawing_area.apply_coord_spec(Cartesian2d::<RangedCoordusize, RangedCoordusize>::new(
             0..total_columns,
@@ -73,7 +75,7 @@ pub fn circuit_layout<F: Field, ConcreteCircuit: Circuit<F>, DB: DrawingBackend>
     ))?;
     root.draw(&Rectangle::new(
         [
-            (cs.num_advice_columns + cs.num_aux_columns, 0),
+            (cs.num_advice_columns + cs.num_instance_columns, 0),
             (total_columns, layout.total_rows),
         ],
         ShapeStyle::from(&BLUE.mix(0.2)).filled(),
@@ -107,7 +109,7 @@ pub fn circuit_layout<F: Field, ConcreteCircuit: Circuit<F>, DB: DrawingBackend>
         if let Some(offset) = region.offset {
             // Sort the region's columns according to the defined ordering.
             let mut columns: Vec<_> = region.columns.into_iter().collect();
-            columns.sort_unstable_by(|a, b| column_index(a).cmp(&column_index(b)));
+            columns.sort_unstable_by_key(|a| column_index(a));
 
             // Render contiguous parts of the same region as a single box.
             let mut width = None;
@@ -251,10 +253,10 @@ impl<F: Field> Assignment<F> for Layout {
 
     fn copy(
         &mut self,
+        _: &Permutation,
+        _: Column<Any>,
         _: usize,
-        _: usize,
-        _: usize,
-        _: usize,
+        _: Column<Any>,
         _: usize,
     ) -> Result<(), crate::plonk::Error> {
         // Do nothing; we don't care about permutations in this context.

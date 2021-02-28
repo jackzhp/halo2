@@ -5,8 +5,8 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::marker::PhantomData;
 
-use super::{Cell, Chip, Layouter, Permutation, Region};
-use crate::plonk::{Advice, Any, Assignment, Column, Error, Fixed};
+use super::{Cell, Chip, Layouter, Region, RegionIndex, RegionStart};
+use crate::plonk::{Advice, Any, Assignment, Column, Error, Fixed, Permutation};
 
 /// Helper trait for implementing a custom [`Layouter`].
 ///
@@ -70,7 +70,9 @@ pub trait RegionLayouter<C: Chip>: fmt::Debug {
 pub struct SingleChip<'a, C: Chip, CS: Assignment<C::Field> + 'a> {
     cs: &'a mut CS,
     config: C::Config,
-    regions: Vec<usize>,
+    loaded: Option<C::Loaded>,
+    /// Stores the starting row for each region.
+    regions: Vec<RegionStart>,
     /// Stores the first empty row for each column.
     columns: HashMap<Column<Any>, usize>,
     _marker: PhantomData<C>,
@@ -88,14 +90,18 @@ impl<'a, C: Chip, CS: Assignment<C::Field> + 'a> fmt::Debug for SingleChip<'a, C
 
 impl<'a, C: Chip, CS: Assignment<C::Field>> SingleChip<'a, C, CS> {
     /// Creates a new single-chip layouter.
-    pub fn new(cs: &'a mut CS, config: C::Config) -> Self {
-        SingleChip {
+    pub fn new(cs: &'a mut CS, config: C::Config) -> Result<Self, Error> {
+        let mut ret = SingleChip {
             cs,
             config,
+            loaded: None,
             regions: vec![],
             columns: HashMap::default(),
             _marker: PhantomData,
-        }
+        };
+        let loaded = C::load(&mut ret)?;
+        ret.loaded = Some(loaded);
+        Ok(ret)
     }
 }
 
@@ -106,16 +112,20 @@ impl<'a, C: Chip, CS: Assignment<C::Field> + 'a> Layouter<C> for SingleChip<'a, 
         &self.config
     }
 
-    fn assign_region<A, N, NR>(&mut self, name: N, mut assignment: A) -> Result<(), Error>
+    fn loaded(&self) -> &C::Loaded {
+        self.loaded.as_ref().expect("We called C::load")
+    }
+
+    fn assign_region<A, AR, N, NR>(&mut self, name: N, mut assignment: A) -> Result<AR, Error>
     where
-        A: FnMut(Region<'_, C>) -> Result<(), Error>,
+        A: FnMut(Region<'_, C>) -> Result<AR, Error>,
         N: Fn() -> NR,
         NR: Into<String>,
     {
         let region_index = self.regions.len();
 
         // Get shape of the region.
-        let mut shape = RegionShape::new(region_index);
+        let mut shape = RegionShape::new(region_index.into());
         {
             let region: &mut dyn RegionLayouter<C> = &mut shape;
             assignment(region.into())?;
@@ -127,7 +137,7 @@ impl<'a, C: Chip, CS: Assignment<C::Field> + 'a> Layouter<C> for SingleChip<'a, 
         for column in &shape.columns {
             region_start = cmp::max(region_start, self.columns.get(column).cloned().unwrap_or(0));
         }
-        self.regions.push(region_start);
+        self.regions.push(region_start.into());
 
         // Update column usage information.
         for column in shape.columns {
@@ -135,14 +145,14 @@ impl<'a, C: Chip, CS: Assignment<C::Field> + 'a> Layouter<C> for SingleChip<'a, 
         }
 
         self.cs.enter_region(name);
-        let mut region = SingleChipRegion::new(self, region_index);
-        {
+        let mut region = SingleChipRegion::new(self, region_index.into());
+        let result = {
             let region: &mut dyn RegionLayouter<C> = &mut region;
-            assignment(region.into())?;
-        }
+            assignment(region.into())
+        }?;
         self.cs.exit_region();
 
-        Ok(())
+        Ok(result)
     }
 
     fn get_root(&mut self) -> &mut Self::Root {
@@ -166,14 +176,14 @@ impl<'a, C: Chip, CS: Assignment<C::Field> + 'a> Layouter<C> for SingleChip<'a, 
 /// the set of columns it uses as well as the number of rows it uses.
 #[derive(Debug)]
 pub struct RegionShape {
-    region_index: usize,
+    region_index: RegionIndex,
     columns: HashSet<Column<Any>>,
     row_count: usize,
 }
 
 impl RegionShape {
     /// Create a new `RegionShape` for a region at `region_index`.
-    pub fn new(region_index: usize) -> Self {
+    pub fn new(region_index: RegionIndex) -> Self {
         RegionShape {
             region_index,
             columns: HashSet::default(),
@@ -182,7 +192,7 @@ impl RegionShape {
     }
 
     /// Get the `region_index` of a `RegionShape`.
-    pub fn region_index(&self) -> usize {
+    pub fn region_index(&self) -> RegionIndex {
         self.region_index
     }
 
@@ -245,7 +255,7 @@ impl<C: Chip> RegionLayouter<C> for RegionShape {
 
 struct SingleChipRegion<'r, 'a, C: Chip, CS: Assignment<C::Field> + 'a> {
     layouter: &'r mut SingleChip<'a, C, CS>,
-    region_index: usize,
+    region_index: RegionIndex,
 }
 
 impl<'r, 'a, C: Chip, CS: Assignment<C::Field> + 'a> fmt::Debug
@@ -260,7 +270,7 @@ impl<'r, 'a, C: Chip, CS: Assignment<C::Field> + 'a> fmt::Debug
 }
 
 impl<'r, 'a, C: Chip, CS: Assignment<C::Field> + 'a> SingleChipRegion<'r, 'a, C, CS> {
-    fn new(layouter: &'r mut SingleChip<'a, C, CS>, region_index: usize) -> Self {
+    fn new(layouter: &'r mut SingleChip<'a, C, CS>, region_index: RegionIndex) -> Self {
         SingleChipRegion {
             layouter,
             region_index,
@@ -281,7 +291,7 @@ impl<'r, 'a, C: Chip, CS: Assignment<C::Field> + 'a> RegionLayouter<C>
         self.layouter.cs.assign_advice(
             annotation,
             column,
-            self.layouter.regions[self.region_index] + offset,
+            *self.layouter.regions[*self.region_index] + offset,
             to,
         )?;
 
@@ -302,7 +312,7 @@ impl<'r, 'a, C: Chip, CS: Assignment<C::Field> + 'a> RegionLayouter<C>
         self.layouter.cs.assign_fixed(
             annotation,
             column,
-            self.layouter.regions[self.region_index] + offset,
+            *self.layouter.regions[*self.region_index] + offset,
             to,
         )?;
 
@@ -319,23 +329,12 @@ impl<'r, 'a, C: Chip, CS: Assignment<C::Field> + 'a> RegionLayouter<C>
         left: Cell,
         right: Cell,
     ) -> Result<(), Error> {
-        let left_column = permutation
-            .mapping
-            .iter()
-            .position(|c| c == &left.column)
-            .ok_or(Error::SynthesisError)?;
-        let right_column = permutation
-            .mapping
-            .iter()
-            .position(|c| c == &right.column)
-            .ok_or(Error::SynthesisError)?;
-
         self.layouter.cs.copy(
-            permutation.index,
-            left_column,
-            self.layouter.regions[left.region_index] + left.row_offset,
-            right_column,
-            self.layouter.regions[right.region_index] + right.row_offset,
+            permutation,
+            left.column,
+            *self.layouter.regions[*left.region_index] + left.row_offset,
+            right.column,
+            *self.layouter.regions[*right.region_index] + right.row_offset,
         )?;
 
         Ok(())

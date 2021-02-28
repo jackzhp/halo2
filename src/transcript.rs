@@ -19,6 +19,10 @@ pub trait Transcript<C: CurveAffine> {
     /// Writing the point to the transcript without writing it to the proof,
     /// treating it as a common input.
     fn common_point(&mut self, point: C) -> io::Result<()>;
+
+    /// Writing the scalar to the transcript without writing it to the proof,
+    /// treating it as a common input.
+    fn common_scalar(&mut self, scalar: C::Scalar) -> io::Result<()>;
 }
 
 /// Transcript view from the perspective of a verifier that has access to an
@@ -55,7 +59,7 @@ impl<R: Read, C: CurveAffine> Blake2bRead<R, C> {
         Blake2bRead {
             state: Blake2bParams::new()
                 .hash_length(64)
-                .personal(C::BLAKE2B_PERSONALIZATION)
+                .personal(b"Halo2-Transcript")
                 .to_state(),
             reader,
             _marker: PhantomData,
@@ -65,8 +69,8 @@ impl<R: Read, C: CurveAffine> Blake2bRead<R, C> {
 
 impl<R: Read, C: CurveAffine> TranscriptRead<C> for Blake2bRead<R, C> {
     fn read_point(&mut self) -> io::Result<C> {
-        let mut compressed = [0u8; 32];
-        self.reader.read_exact(&mut compressed[..])?;
+        let mut compressed = C::Repr::default();
+        self.reader.read_exact(compressed.as_mut())?;
         let point: C = Option::from(C::from_bytes(&compressed)).ok_or_else(|| {
             io::Error::new(io::ErrorKind::Other, "invalid point encoding in proof")
         })?;
@@ -84,7 +88,7 @@ impl<R: Read, C: CurveAffine> TranscriptRead<C> for Blake2bRead<R, C> {
                 "invalid field element encoding in proof",
             )
         })?;
-        self.state.update(&scalar.to_bytes());
+        self.common_scalar(scalar)?;
 
         Ok(scalar)
     }
@@ -100,6 +104,12 @@ impl<R: Read, C: CurveAffine> Transcript<C> for Blake2bRead<R, C> {
         })?;
         self.state.update(&x.to_bytes());
         self.state.update(&y.to_bytes());
+
+        Ok(())
+    }
+
+    fn common_scalar(&mut self, scalar: C::Scalar) -> io::Result<()> {
+        self.state.update(&scalar.to_bytes());
 
         Ok(())
     }
@@ -126,7 +136,7 @@ impl<W: Write, C: CurveAffine> Blake2bWrite<W, C> {
         Blake2bWrite {
             state: Blake2bParams::new()
                 .hash_length(64)
-                .personal(C::BLAKE2B_PERSONALIZATION)
+                .personal(b"Halo2-Transcript")
                 .to_state(),
             writer,
             _marker: PhantomData,
@@ -144,10 +154,10 @@ impl<W: Write, C: CurveAffine> TranscriptWrite<C> for Blake2bWrite<W, C> {
     fn write_point(&mut self, point: C) -> io::Result<()> {
         self.common_point(point)?;
         let compressed = point.to_bytes();
-        self.writer.write_all(&compressed[..])
+        self.writer.write_all(compressed.as_ref())
     }
     fn write_scalar(&mut self, scalar: C::Scalar) -> io::Result<()> {
-        self.state.update(&scalar.to_bytes());
+        self.common_scalar(scalar)?;
         let data = scalar.to_bytes();
         self.writer.write_all(&data[..])
     }
@@ -163,6 +173,12 @@ impl<W: Write, C: CurveAffine> Transcript<C> for Blake2bWrite<W, C> {
         })?;
         self.state.update(&x.to_bytes());
         self.state.update(&y.to_bytes());
+
+        Ok(())
+    }
+
+    fn common_scalar(&mut self, scalar: C::Scalar) -> io::Result<()> {
+        self.state.update(&scalar.to_bytes());
 
         Ok(())
     }

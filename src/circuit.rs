@@ -4,7 +4,7 @@ use std::{fmt, marker::PhantomData};
 
 use crate::{
     arithmetic::FieldExt,
-    plonk::{Advice, Any, Column, ConstraintSystem, Error, Fixed},
+    plonk::{Advice, Any, Column, Error, Fixed, Permutation},
 };
 
 pub mod layouter;
@@ -16,8 +16,16 @@ pub mod layouter;
 /// [`Layouter::config`].
 pub trait Chip: Sized {
     /// A type that holds the configuration for this chip, and any other state it may need
-    /// during circuit synthesis.
+    /// during circuit synthesis, that can be derived during [`Circuit::configure`].
+    ///
+    /// [`Circuit::configure`]: crate::plonk::Circuit::configure
     type Config: fmt::Debug;
+
+    /// A type that holds any general chip state that needs to be loaded at the start of
+    /// [`Circuit::synthesize`]. This might simply be `()` for some chips.
+    ///
+    /// [`Circuit::synthesize`]: crate::plonk::Circuit::synthesize
+    type Loaded: fmt::Debug;
 
     /// The field that the chip is defined over.
     ///
@@ -25,34 +33,56 @@ pub trait Chip: Sized {
     type Field: FieldExt;
 
     /// Load any fixed configuration for this chip into the circuit.
-    fn load(layouter: &mut impl Layouter<Self>) -> Result<(), Error>;
+    ///
+    /// `layouter.loaded()` will panic if called inside this function.
+    fn load(layouter: &mut impl Layouter<Self>) -> Result<Self::Loaded, Error>;
+}
+
+/// Index of a region in a layouter
+#[derive(Clone, Copy, Debug)]
+pub struct RegionIndex(usize);
+
+impl From<usize> for RegionIndex {
+    fn from(idx: usize) -> RegionIndex {
+        RegionIndex(idx)
+    }
+}
+
+impl std::ops::Deref for RegionIndex {
+    type Target = usize;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+/// Starting row of a region in a layouter
+#[derive(Clone, Copy, Debug)]
+pub struct RegionStart(usize);
+
+impl From<usize> for RegionStart {
+    fn from(idx: usize) -> RegionStart {
+        RegionStart(idx)
+    }
+}
+
+impl std::ops::Deref for RegionStart {
+    type Target = usize;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
 /// A pointer to a cell within a circuit.
 #[derive(Clone, Copy, Debug)]
 pub struct Cell {
     /// Identifies the region in which this cell resides.
-    region_index: usize,
+    region_index: RegionIndex,
+    /// The relative offset of this cell within its region.
     row_offset: usize,
+    /// The column of this cell.
     column: Column<Any>,
-}
-
-/// A permutation configured by a chip.
-#[derive(Clone, Debug)]
-pub struct Permutation {
-    index: usize,
-    mapping: Vec<Column<Any>>,
-}
-
-impl Permutation {
-    /// Configures a new permutation for the given columns.
-    pub fn new<F: FieldExt>(meta: &mut ConstraintSystem<F>, columns: &[Column<Advice>]) -> Self {
-        let index = meta.permutation(columns);
-        Permutation {
-            index,
-            mapping: columns.iter().map(|c| (*c).into()).collect(),
-        }
-    }
 }
 
 /// A region of the circuit in which a [`Chip`] can assign cells.
@@ -143,6 +173,12 @@ pub trait Layouter<C: Chip> {
     /// Provides access to the chip configuration.
     fn config(&self) -> &C::Config;
 
+    /// Provides access to general chip state loaded at the beginning of circuit
+    /// synthesis.
+    ///
+    /// Panics if called inside `C::load`.
+    fn loaded(&self) -> &C::Loaded;
+
     /// Assign a region of gates to an absolute row number.
     ///
     /// Inside the closure, the chip may freely use relative offsets; the `Layouter` will
@@ -154,9 +190,9 @@ pub trait Layouter<C: Chip> {
     ///     region.assign_advice(self.config.a, offset, || { Some(value)});
     /// });
     /// ```
-    fn assign_region<A, N, NR>(&mut self, name: N, assignment: A) -> Result<(), Error>
+    fn assign_region<A, AR, N, NR>(&mut self, name: N, assignment: A) -> Result<AR, Error>
     where
-        A: FnMut(Region<'_, C>) -> Result<(), Error>,
+        A: FnMut(Region<'_, C>) -> Result<AR, Error>,
         N: Fn() -> NR,
         NR: Into<String>;
 
@@ -202,9 +238,13 @@ impl<'a, C: Chip, L: Layouter<C> + 'a> Layouter<C> for NamespacedLayouter<'a, C,
         self.0.config()
     }
 
-    fn assign_region<A, N, NR>(&mut self, name: N, assignment: A) -> Result<(), Error>
+    fn loaded(&self) -> &C::Loaded {
+        self.0.loaded()
+    }
+
+    fn assign_region<A, AR, N, NR>(&mut self, name: N, assignment: A) -> Result<AR, Error>
     where
-        A: FnMut(Region<'_, C>) -> Result<(), Error>,
+        A: FnMut(Region<'_, C>) -> Result<AR, Error>,
         N: Fn() -> NR,
         NR: Into<String>,
     {
